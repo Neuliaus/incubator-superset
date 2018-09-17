@@ -1,10 +1,18 @@
+# -*- coding: utf-8 -*-
+# pylint: disable=C,R,W
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
+
 import json
 
+from past.builtins import basestring
 from sqlalchemy import (
-    and_, Column, Integer, String, Text, Boolean,
+    and_, Boolean, Column, Integer, String, Text,
 )
-from sqlalchemy.orm import foreign, relationship
 from sqlalchemy.ext.declarative import declared_attr
+from sqlalchemy.orm import foreign, relationship
 
 from superset import utils
 from superset.models.core import Slice
@@ -42,13 +50,19 @@ class BaseDatasource(AuditMixinNullable, ImportMixin):
     params = Column(String(1000))
     perm = Column(String(1000))
 
+    sql = None
+    owner = None
+    update_from_object_fields = None
+
     @declared_attr
     def slices(self):
         return relationship(
             'Slice',
             primaryjoin=lambda: and_(
-              foreign(Slice.datasource_id) == self.id,
-              foreign(Slice.datasource_type) == self.type))
+                foreign(Slice.datasource_id) == self.id,
+                foreign(Slice.datasource_type) == self.type,
+            ),
+        )
 
     # placeholder for a relationship to a derivative of BaseColumn
     columns = []
@@ -58,7 +72,7 @@ class BaseDatasource(AuditMixinNullable, ImportMixin):
     @property
     def uid(self):
         """Unique id across datasource types"""
-        return "{self.id}__{self.type}".format(**locals())
+        return '{self.id}__{self.type}'.format(**locals())
 
     @property
     def column_names(self):
@@ -70,7 +84,11 @@ class BaseDatasource(AuditMixinNullable, ImportMixin):
 
     @property
     def main_dttm_col(self):
-        return "timestamp"
+        return 'timestamp'
+
+    @property
+    def datasource_name(self):
+        raise NotImplementedError()
 
     @property
     def connection(self):
@@ -103,7 +121,7 @@ class BaseDatasource(AuditMixinNullable, ImportMixin):
         if self.default_endpoint:
             return self.default_endpoint
         else:
-            return "/superset/explore/{obj.type}/{obj.id}/".format(obj=self)
+            return '/superset/explore/{obj.type}/{obj.id}/'.format(obj=self)
 
     @property
     def column_formats(self):
@@ -113,11 +131,18 @@ class BaseDatasource(AuditMixinNullable, ImportMixin):
             if m.d3format
         }
 
+    def add_missing_metrics(self, metrics):
+        exisiting_metrics = {m.metric_name for m in self.metrics}
+        for metric in metrics:
+            if metric.metric_name not in exisiting_metrics:
+                metric.table_id = self.id
+                self.metrics += [metric]
+
     @property
     def metrics_combo(self):
         return sorted(
             [
-                (m.metric_name, m.verbose_name or m.metric_name)
+                (m.metric_name, m.verbose_name or m.metric_name or '')
                 for m in self.metrics],
             key=lambda x: x[1])
 
@@ -136,6 +161,10 @@ class BaseDatasource(AuditMixinNullable, ImportMixin):
         }
 
     @property
+    def select_star(self):
+        pass
+
+    @property
     def data(self):
         """Data representation of the datasource sent to the frontend"""
         order_by_choices = []
@@ -143,30 +172,82 @@ class BaseDatasource(AuditMixinNullable, ImportMixin):
             order_by_choices.append((json.dumps([s, True]), s + ' [asc]'))
             order_by_choices.append((json.dumps([s, False]), s + ' [desc]'))
 
-        verbose_map = {
+        verbose_map = {'__timestamp': 'Time'}
+        verbose_map.update({
             o.metric_name: o.verbose_name or o.metric_name
             for o in self.metrics
-        }
+        })
         verbose_map.update({
             o.column_name: o.verbose_name or o.column_name
             for o in self.columns
         })
         return {
-            'all_cols': utils.choicify(self.column_names),
+            # simple fields
+            'id': self.id,
             'column_formats': self.column_formats,
+            'description': self.description,
+            'database': self.database.data,  # pylint: disable=no-member
+            'default_endpoint': self.default_endpoint,
+            'filter_select': self.filter_select_enabled,  # TODO deprecate
+            'filter_select_enabled': self.filter_select_enabled,
+            'name': self.name,
+            'datasource_name': self.datasource_name,
+            'type': self.type,
+            'schema': self.schema,
+            'offset': self.offset,
+            'cache_timeout': self.cache_timeout,
+            'params': self.params,
+            'perm': self.perm,
+
+            # sqla-specific
+            'sql': self.sql,
+
+            # computed fields
+            'all_cols': utils.choicify(self.column_names),
+            'columns': [o.data for o in self.columns],
             'edit_url': self.url,
-            'filter_select': self.filter_select_enabled,
             'filterable_cols': utils.choicify(self.filterable_column_names),
             'gb_cols': utils.choicify(self.groupby_column_names),
-            'id': self.id,
-            'metrics_combo': self.metrics_combo,
-            'name': self.name,
-            'order_by_choices': order_by_choices,
-            'type': self.type,
             'metrics': [o.data for o in self.metrics],
-            'columns': [o.data for o in self.columns],
+            'metrics_combo': self.metrics_combo,
+            'order_by_choices': order_by_choices,
+            'owner': self.owner.id if self.owner else None,
             'verbose_map': verbose_map,
+            'select_star': self.select_star,
         }
+
+    @staticmethod
+    def filter_values_handler(
+            values, target_column_is_numeric=False, is_list_target=False):
+        def handle_single_value(v):
+            # backward compatibility with previous <select> components
+            if isinstance(v, basestring):
+                v = v.strip('\t\n \'"')
+                if target_column_is_numeric:
+                    # For backwards compatibility and edge cases
+                    # where a column data type might have changed
+                    v = utils.string_to_num(v)
+                if v == '<NULL>':
+                    return None
+                elif v == '<empty string>':
+                    return ''
+            return v
+        if isinstance(values, (list, tuple)):
+            values = [handle_single_value(v) for v in values]
+        else:
+            values = handle_single_value(values)
+        if is_list_target and not isinstance(values, (tuple, list)):
+            values = [values]
+        elif not is_list_target and isinstance(values, (tuple, list)):
+            if len(values) > 0:
+                values = values[0]
+            else:
+                values = None
+        return values
+
+    def external_metadata(self):
+        """Returns column information from the external system"""
+        raise NotImplementedError()
 
     def get_query_str(self, query_obj):
         """Returns a query as a string
@@ -190,6 +271,77 @@ class BaseDatasource(AuditMixinNullable, ImportMixin):
         values in filters in the explore view"""
         raise NotImplementedError()
 
+    @staticmethod
+    def default_query(qry):
+        return qry
+
+    def get_column(self, column_name):
+        for col in self.columns:
+            if col.column_name == column_name:
+                return col
+
+    def get_fk_many_from_list(
+            self, object_list, fkmany, fkmany_class, key_attr):
+        """Update ORM one-to-many list from object list
+
+        Used for syncing metrics and columns using the same code"""
+
+        object_dict = {o.get(key_attr): o for o in object_list}
+        object_keys = [o.get(key_attr) for o in object_list]
+
+        # delete fks that have been removed
+        fkmany = [o for o in fkmany if getattr(o, key_attr) in object_keys]
+
+        # sync existing fks
+        for fk in fkmany:
+            obj = object_dict.get(getattr(fk, key_attr))
+            for attr in fkmany_class.update_from_object_fields:
+                setattr(fk, attr, obj.get(attr))
+
+        # create new fks
+        new_fks = []
+        orm_keys = [getattr(o, key_attr) for o in fkmany]
+        for obj in object_list:
+            key = obj.get(key_attr)
+            if key not in orm_keys:
+                del obj['id']
+                orm_kwargs = {}
+                for k in obj:
+                    if (
+                        k in fkmany_class.update_from_object_fields and
+                        k in obj
+                    ):
+                        orm_kwargs[k] = obj[k]
+                new_obj = fkmany_class(**orm_kwargs)
+                new_fks.append(new_obj)
+        fkmany += new_fks
+        return fkmany
+
+    def update_from_object(self, obj):
+        """Update datasource from a data structure
+
+        The UI's table editor crafts a complex data structure that
+        contains most of the datasource's properties as well as
+        an array of metrics and columns objects. This method
+        receives the object from the UI and syncs the datasource to
+        match it. Since the fields are different for the different
+        connectors, the implementation uses ``update_from_object_fields``
+        which can be defined for each connector and
+        defines which fields should be synced"""
+        for attr in self.update_from_object_fields:
+            setattr(self, attr, obj.get(attr))
+
+        self.user_id = obj.get('owner')
+
+        # Syncing metrics
+        metrics = self.get_fk_many_from_list(
+            obj.get('metrics'), self.metrics, self.metric_class, 'metric_name')
+        self.metrics = metrics
+
+        # Syncing columns
+        self.columns = self.get_fk_many_from_list(
+            obj.get('columns'), self.columns, self.column_class, 'column_name')
+
 
 class BaseColumn(AuditMixinNullable, ImportMixin):
     """Interface for column"""
@@ -209,6 +361,7 @@ class BaseColumn(AuditMixinNullable, ImportMixin):
     min = Column(Boolean, default=False)
     filterable = Column(Boolean, default=False)
     description = Column(Text)
+    is_dttm = None
 
     # [optional] Set this to support import/export functionality
     export_fields = []
@@ -218,7 +371,7 @@ class BaseColumn(AuditMixinNullable, ImportMixin):
 
     num_types = (
         'DOUBLE', 'FLOAT', 'INT', 'BIGINT',
-        'LONG', 'REAL', 'NUMERIC', 'DECIMAL'
+        'LONG', 'REAL', 'NUMERIC', 'DECIMAL', 'MONEY',
     )
     date_types = ('DATE', 'TIME', 'DATETIME')
     str_types = ('VARCHAR', 'STRING', 'CHAR')
@@ -251,9 +404,11 @@ class BaseColumn(AuditMixinNullable, ImportMixin):
     @property
     def data(self):
         attrs = (
-            'column_name', 'verbose_name', 'description', 'expression',
-            'filterable', 'groupby')
-        return {s: getattr(self, s) for s in attrs}
+            'id', 'column_name', 'verbose_name', 'description', 'expression',
+            'filterable', 'groupby', 'is_dttm', 'type',
+            'database_expression', 'python_date_format',
+        )
+        return {s: getattr(self, s) for s in attrs if hasattr(self, s)}
 
 
 class BaseMetric(AuditMixinNullable, ImportMixin):
@@ -295,6 +450,6 @@ class BaseMetric(AuditMixinNullable, ImportMixin):
     @property
     def data(self):
         attrs = (
-            'metric_name', 'verbose_name', 'description', 'expression',
-            'warning_text')
+            'id', 'metric_name', 'verbose_name', 'description', 'expression',
+            'warning_text', 'd3format')
         return {s: getattr(self, s) for s in attrs}

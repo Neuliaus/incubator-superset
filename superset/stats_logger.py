@@ -1,4 +1,12 @@
+# -*- coding: utf-8 -*-
+# pylint: disable=C,R,W
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
+
 import logging
+
 from colorama import Fore, Style
 
 
@@ -21,6 +29,9 @@ class BaseStatsLogger(object):
         """Decrement a counter"""
         raise NotImplementedError()
 
+    def timing(self, key, value):
+        raise NotImplementedError()
+
     def gauge(self, key):
         """Setup a gauge"""
         raise NotImplementedError()
@@ -29,16 +40,22 @@ class BaseStatsLogger(object):
 class DummyStatsLogger(BaseStatsLogger):
     def incr(self, key):
         logging.debug(
-            Fore.CYAN + "[stats_logger] (incr) " + key + Style.RESET_ALL)
+            Fore.CYAN + '[stats_logger] (incr) ' + key + Style.RESET_ALL)
 
     def decr(self, key):
-        logging.debug(Fore.CYAN + "[stats_logger] (decr) " + key +
-                     Style.RESET_ALL)
+        logging.debug((
+            Fore.CYAN + '[stats_logger] (decr) ' + key +
+            Style.RESET_ALL))
+
+    def timing(self, key, value):
+        logging.debug((
+            Fore.CYAN + '[stats_logger] (timing) {key} | {value} ' +
+            Style.RESET_ALL).format(**locals()))
 
     def gauge(self, key, value):
         logging.debug((
-            Fore.CYAN + "[stats_logger] (gauge) "
-            "{key} | {value}" + Style.RESET_ALL).format(**locals()))
+            Fore.CYAN + '[stats_logger] (gauge) '
+            '{key} | {value}' + Style.RESET_ALL).format(**locals()))
 
 
 try:
@@ -53,6 +70,9 @@ try:
 
         def decr(self, key):
             self.client.decr(key)
+
+        def timing(self, key, value):
+            self.client.timing(key, value)
 
         def gauge(self, key):
             # pylint: disable=no-value-for-parameter
